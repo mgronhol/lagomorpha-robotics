@@ -13,6 +13,16 @@ import threading
 
 import struct, socket
 
+# Functions for controlling the robot.
+#
+# A phone connected to the robot has a running webcam,
+# and the livestream is processed to determine what
+# kind of environment the robot is in. Using computer vision,
+# the robot can autonomously follow a line, solve the labyrinth,
+# and detect and cross brigdes.
+# It can also determine that it's in a forest, but solving the
+# forest autonomously is still TODO. 
+
 
 ## Commands for robot control via UDP
 CMD_MOVE = 1
@@ -21,6 +31,14 @@ CMD_STOP = 3
 CMD_JOG = 4
 CMD_CRANE = 5
 
+ROBOT_ADDRESS = '192.168.43.123'
+ROBOT_PORT = 8123
+
+#
+# Communication with robot
+#
+
+
 # create UDP socket
 sock = socket.socket( socket.AF_INET, socket.SOCK_DGRAM )
 
@@ -28,6 +46,21 @@ sock = socket.socket( socket.AF_INET, socket.SOCK_DGRAM )
 def pack( cmd, flags, speed, value ):
 	return struct.pack( ">BBhh", cmd, flags, int(speed), int(value) ) + b" "*10
 
+# function to rotate robot
+def rotate_robot( angle ):
+	print( "Posting to robot")
+	msg = pack( CMD_ROTATE, 0x00, 300, angle )
+	sock.sendto( msg, (ROBOT_ADDRESS, ROBOT_PORT ) )
+	
+# function to move the robot
+def move_robot( dist ):
+	print( "Posting to robot")
+	msg = pack( CMD_MOVE, 0x00, 450, dist )
+	sock.sendto( msg, (ROBOT_ADDRESS, ROBOT_PORT ) )
+
+#
+# Image processing and robot control
+#
 
 # compute image entropy
 def compute_entropy( img ):
@@ -37,9 +70,7 @@ def compute_entropy( img ):
 	entropy = -1 * (hist*logs).sum()
 	return entropy
 	
-	
-
-# Generate and test hypotheses wether image contains lines
+# Generate and test hypotheses whether image contains lines
 def generate_line_hypotheses( img ):
 	
 	img[:,0:int(img.shape[1]*0.3)] = 0
@@ -64,22 +95,6 @@ def generate_line_hypotheses( img ):
 	
 	
 	return {"no": hypothesis_no_track, "all": hypothesis_all_track, "some": hypothesis_some_track, "centroid": (cx,cy), "side": left_total < right_total}
-	
-
-
-# function to rotate robot
-def rotate_robot( angle ):
-	print( "Posting to robot")
-	msg = pack( CMD_ROTATE, 0x00, 300, angle )
-	sock.sendto( msg, ('192.168.43.123', 8123 ) )
-	
-
-# function to move the robot
-def move_robot( dist ):
-	print( "Posting to robot")
-	msg = pack( CMD_MOVE, 0x00, 450, dist )
-	sock.sendto( msg, ('192.168.43.123', 8123 ) )
-	
 
 
 # find image centroid (center of "mass" )
@@ -124,11 +139,11 @@ class StreamThread( threading.Thread ):
 			print( "Missing frame..." )
 
 
-# negative feedback control for servoing the robot towards target
+# Negative feedback control for servoing the robot towards target
 def servo_towards_centroid( mask, cx ):
 	global servo_t
-	dangle = cx - mask.shape[1]/2
-	angle = int(dangle*1.1)
+	dangle = cx - mask.shape[1] / 2
+	angle = int(dangle * 1.1)
 	print( "dangle", dangle, "angle", angle )
 	
 	# Measured: 3456 tacho steps per metre
@@ -136,7 +151,6 @@ def servo_towards_centroid( mask, cx ):
 	
 	# if angular error is small enough -> move towards target
 	if abs(dangle) < 15:
-	#if abs(dangle) < 12:# for bridges
 		move_robot( int( 35 / gain ) )
 	else:
 		rotate_robot( angle )
@@ -144,7 +158,7 @@ def servo_towards_centroid( mask, cx ):
 
 
 def compute_sparsest_area( img ):
-	#values = cv2.reduce( img, 0, cv2.REDUCE_SUM, dtype=cv2.CV_32S ).ravel()
+
 	values = [row.sum() for row in cv2.transpose(img)]
 	print( "len(values)", len(values) )
 	w = [values[0]]*40
@@ -152,17 +166,17 @@ def compute_sparsest_area( img ):
 	for v in values:
 		w.append( v )
 		w = w[1:]
-		flt.append( sum(w)*1.0/len(w) )
+		flt.append( sum(w) * 1.0 / len(w) )
 	
 	mf = max(flt)
 	flt2 = []
 	for v in flt:
-		flt2.append( 1 - v/mf )
+		flt2.append( 1 - v / mf )
 	
 	Xflt2 = 0.0
 	Aflt2 = 0.0
 	for i in range( len(flt2) ):
-		Xflt2 += i*flt2[i]
+		Xflt2 += i * flt2[i]
 		Aflt2 += flt2[i]
 	
 	print( "XFlt2", Xflt2, "Aflt2", Aflt2 )
@@ -172,24 +186,24 @@ def compute_sparsest_area( img ):
 stream = StreamThread()
 stream.start()
 
+ROBOT_STATE = "IDLE"
+STATE_HISTORY = []
+
+bridge_cnt = 5
 prev_cnt = 0
 
 t_last_servo = time.time()
 
 
-ROBOT_STATE = "IDLE"
-
-#move_robot(300)
-
-STATE_HISTORY = []
-
-bridge_cnt = 5
-
-
 while True:
+
+		# Process image from stream. Rotate it correctly (depends on how
+		# camera is positioned), and convert it to HSV for easier detection
+		# of color changes. Based on colors and their distribution in the
+		# image, detect what type of area we are in and control robot
+		# accordingly.
+
 		try:
-			#if stream.output is None:
-			#	continue
 			if prev_cnt == stream.cnt:
 				continue
 			prev_cnt = stream.cnt
@@ -204,7 +218,6 @@ while True:
 			
 			hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 			hsv = cv2.warpAffine( hsv, M, (cols, rows) )
-			#hsv = cv2.flip( hsv, 1 )
 			true_color = cv2.warpAffine( img, M, (cols, rows) )
 			
 			cv2.imshow( "True", true_color )
@@ -216,8 +229,10 @@ while True:
 			
 			
 			hsv = hsv[int(hsv.shape[0]*0.3):, :]
-			found_viivat = False
-			# viiva lattiassa
+			found_lines = False
+
+
+			# Lines on the floor
 			if True:
 				limit1 = np.array([0, 0, 220])
 				limit2 = np.array([180, 15, 255])
@@ -231,18 +246,14 @@ while True:
 					cv2.circle(mask, (cy,cx), 10, (255,0,0), 1)
 					
 					left = mask[:, :int(1*mask.shape[1]/3)].sum()
-					#print( "left", left )
 					
 					centre = mask[:, int(1*mask.shape[1]/3):int(2*mask.shape[1]/3)].sum()
-					#print( "centre", centre )
 					
 					right = mask[:, int(2*mask.shape[1]/3):].sum()
-					#print( "right", right )
 					
 					q_left = left*1.0/centre
 					q_right = right*1.0/centre
 					
-					#print( "q_left", q_left, "q_right", q_right )
 					
 					if False:
 						if q_left > 0.4:
@@ -256,14 +267,15 @@ while True:
 							pass
 					
 					viivat_lattiassa_mask = mask.copy()
-					found_viivat = True
+					found_lines = True
 					bridge_cnt = 5
 					
 				
 				mask = cv2.cvtColor( mask, cv2.COLOR_GRAY2BGR )
 				cv2.imshow( "Mask, viiva lattiassa", mask )
 			
-			# Labyrinttinappula
+
+			# Labyrinth button
 			if True:
 				limit1 = np.array([25, 220, 220])
 				limit2 = np.array([35, 255, 255])
@@ -297,17 +309,16 @@ while True:
 						
 				
 				
-				cv2.imshow( "Mask, labyrinttinappula", mask )
+				cv2.imshow( "Mask, labyrinth button", mask )
 			
-			# Silta
+			# Bridge
 			if True:
 				limit1 = np.array([0, 50, 150])
 				limit2 = np.array([35, 255, 255])
 				
 				mask = cv2.inRange( hsv, limit1, limit2 )
 				
-				if found_viivat:
-					#mask = cv2.bitwise_or( mask, viivat_lattiassa_mask )
+				if found_lines:
 					print( mask.shape, viivat_lattiassa_mask.shape )
 					mask = cv2.add( mask, viivat_lattiassa_mask )
 				
@@ -317,7 +328,6 @@ while True:
 				
 				if ret:
 					cx, cy = centroid
-					#print( "centroid", centroid )
 					cv2.circle(mask, (cy,cx), 10, (255,0,0), 1)
 					
 					if ROBOT_STATE == "BRIDGE":
@@ -329,12 +339,10 @@ while True:
 						if bridge_cnt < 1:
 							ROBOT_STATE = "IDLE"
 				
-				cv2.imshow( "Mask, silta", mask )
+				cv2.imshow( "Mask, bridge", mask )
 			
-			# Tolpat
+			# "Forest" of metal pillars
 			if True:
-				#limit1 = np.array([0, 0, 80])
-				#limit2 = np.array([180, 50, 250])
 				limit1 = np.array([0, 0, 0])
 				limit2 = np.array([180, 50, 80])
 				
@@ -351,28 +359,28 @@ while True:
 					
 					img2 = cv2.resize( img2, None, fx = 2.0, fy = 2.0 )
 					
-					cv2.imshow( "Mask, tolpat, v2", img2 )
+					cv2.imshow( "Mask, pillars, v2", img2 )
 					
 					
 					if ROBOT_STATE == "FOREST":
-						
-						#sparsest = compute_sparsest_area( mask )
+						# TODO complete this
 						sparsest = compute_sparsest_area( img2 )
 						print("sparsest", sparsest)
 						#servo_towards_centroid( mask, int(sparsest) )
 						#time.sleep(0.5)
 						#move_robot(200)
 						#time.sleep(0.5)
-					
-				#cv2.imshow( "Mask, tolpat", mask )
 			
 			
 			
 			
 		except IOError:
+			# If frames are missing (not processed quick enough etc),
+			# just move to the next one
 			print( "Missing frame.." )
 		
 		key = cv2.waitKey(25)
+		# Exit on Esc
 		if key & 0xff == 27:
 			exit(0)
 		
